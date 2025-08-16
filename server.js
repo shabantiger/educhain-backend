@@ -357,7 +357,7 @@ const checkUsageLimits = async (institutionId) => {
   return { allowed: true };
 };
 
-// Admin: Approve/Reject verification request
+// Modified admin verification approval to include blockchain registration
 app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (req, res) => {
   try {
     const { requestId } = req.params;
@@ -393,14 +393,49 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
     // Update institution verification status
     if (status === 'approved') {
       institution.isVerified = true;
+      institution.verificationStatus = 'approved';
+      
+      // NEW: Register institution on blockchain
+      try {
+        const { blockchainService } = require('./lib/blockchain.js'); // Adjust path as needed
+        
+        // Connect admin wallet (you'll need to set this up)
+        await blockchainService.connectWallet();
+        
+        // Register institution on blockchain
+        const txHash = await blockchainService.registerInstitution(
+          institution.name,
+          institution.email
+        );
+        
+        console.log(`Institution ${institution.name} registered on blockchain. TX: ${txHash}`);
+        
+        // Store blockchain registration info
+        institution.blockchainRegistered = true;
+        institution.blockchainTxHash = txHash;
+        
+      } catch (blockchainError) {
+        console.error('Failed to register institution on blockchain:', blockchainError);
+        
+        // You can either:
+        // 1. Fail the entire verification
+        // return res.status(500).json({ error: 'Failed to register on blockchain' });
+        
+        // 2. Or allow backend verification but flag for manual blockchain registration
+        institution.blockchainRegistered = false;
+        institution.blockchainError = blockchainError.message;
+      }
     } else {
       institution.isVerified = false;
+      institution.verificationStatus = 'rejected';
     }
+    
     await institution.save();
 
     res.json({
       message: `Verification request ${status}`,
-      institution
+      institution,
+      blockchainRegistered: institution.blockchainRegistered
     });
 
   } catch (error) {
@@ -411,6 +446,104 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
   }
 });
 
+// NEW: Manual blockchain registration endpoint for already verified institutions
+app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, async (req, res) => {
+  try {
+    const { institutionId } = req.params;
+    
+    const institution = await Institution.findById(institutionId);
+    if (!institution) {
+      return res.status(404).json({ error: 'Institution not found' });
+    }
+    
+    if (!institution.isVerified) {
+      return res.status(400).json({ error: 'Institution must be verified first' });
+    }
+    
+    if (institution.blockchainRegistered) {
+      return res.status(400).json({ error: 'Institution already registered on blockchain' });
+    }
+    
+    // Register on blockchain
+    const { blockchainService } = require('./lib/blockchain.js');
+    await blockchainService.connectWallet();
+    
+    const txHash = await blockchainService.registerInstitution(
+      institution.name,
+      institution.email
+    );
+    
+    // Update institution record
+    institution.blockchainRegistered = true;
+    institution.blockchainTxHash = txHash;
+    institution.blockchainError = null;
+    await institution.save();
+    
+    res.json({
+      message: 'Institution registered on blockchain successfully',
+      transactionHash: txHash,
+      institution
+    });
+    
+  } catch (error) {
+    console.error('Blockchain registration error:', error);
+    res.status(500).json({ error: 'Failed to register on blockchain' });
+  }
+});
+
+// NEW: Check if institution is authorized on blockchain
+app.get('/api/institutions/:institutionId/blockchain-status', authenticateToken, async (req, res) => {
+  try {
+    const { institutionId } = req.params;
+    
+    // Verify this is the same institution or admin
+    if (req.user.institutionId !== institutionId && req.headers['admin-email'] !== 'admin@educhain.com') {
+      return res.status(403).json({ error: 'Unauthorized' });
+    }
+    
+    const institution = await Institution.findById(institutionId);
+    if (!institution) {
+      return res.status(404).json({ error: 'Institution not found' });
+    }
+    
+    // Check blockchain status
+    const { blockchainService } = require('./lib/blockchain.js');
+    
+    try {
+      const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+      
+      res.json({
+        institution: {
+          name: institution.name,
+          email: institution.email,
+          walletAddress: institution.walletAddress,
+          backendVerified: institution.isVerified,
+          blockchainRegistered: institution.blockchainRegistered
+        },
+        blockchainStats: stats,
+        isAuthorizedOnChain: stats.isAuthorized
+      });
+      
+    } catch (blockchainError) {
+      res.json({
+        institution: {
+          name: institution.name,
+          email: institution.email,
+          walletAddress: institution.walletAddress,
+          backendVerified: institution.isVerified,
+          blockchainRegistered: institution.blockchainRegistered
+        },
+        blockchainStats: null,
+        isAuthorizedOnChain: false,
+        error: blockchainError.message
+      });
+    }
+    
+  } catch (error) {
+    console.error('Blockchain status check error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
 // Admin: Manually verify institution (for testing)
 app.post('/api/admin/verify-institution/:institutionId', isAdmin, async (req, res) => {
   try {

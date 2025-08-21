@@ -45,10 +45,10 @@ const upload = multer({ storage });
 // const subscriptions = []; // Removed unused variable
 
 // Replace the old SUBSCRIPTION_PLANS with the import from pricing config
-import PRICING_CONFIG from './config/pricing.js';
 let SUBSCRIPTION_PLANS;
 try {
-  SUBSCRIPTION_PLANS = PRICING_CONFIG.plans;
+  const PRICING_CONFIG = await import('./config/pricing.js');
+  SUBSCRIPTION_PLANS = PRICING_CONFIG.default.plans;
   if (!SUBSCRIPTION_PLANS) throw new Error('Pricing config missing plans');
 } catch (err) {
   console.error('Failed to load pricing config:', err);
@@ -397,7 +397,7 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
       
       // NEW: Register institution on blockchain
       try {
-        const { blockchainService } = require('./lib/blockchain.js'); // Adjust path as needed
+        const { blockchainService } = await import('./lib/blockchain.js');
         
         // Connect admin wallet (you'll need to set this up)
         await blockchainService.connectWallet();
@@ -413,6 +413,7 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
         // Store blockchain registration info
         institution.blockchainRegistered = true;
         institution.blockchainTxHash = txHash;
+         institution.blockchainRegistrationDate = new Date();
         
       } catch (blockchainError) {
         console.error('Failed to register institution on blockchain:', blockchainError);
@@ -446,7 +447,7 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
   }
 });
 
-// NEW: Manual blockchain registration endpoint for already verified institutions
+// Enhanced: Manual blockchain registration endpoint for already verified institutions
 app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, async (req, res) => {
   try {
     const { institutionId } = req.params;
@@ -460,12 +461,49 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
       return res.status(400).json({ error: 'Institution must be verified first' });
     }
     
+         // Check if already registered on blockchain
+     try {
+       const { blockchainService } = await import('./lib/blockchain.js');
+      await blockchainService.connectWallet();
+      
+      const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+      
+      if (stats.isAuthorized) {
+        // Update database to reflect blockchain status
+        institution.blockchainRegistered = true;
+        institution.blockchainAuthorized = true;
+        institution.blockchainError = null;
+        await institution.save();
+        
+        return res.json({
+          message: 'Institution already authorized on blockchain',
+          institution,
+          blockchainStatus: 'already_authorized'
+        });
+      }
+      
+      if (stats.registrationDate > 0) {
+        // Registered but not authorized - you might need to call authorize function
+        institution.blockchainRegistered = true;
+        institution.blockchainAuthorized = false;
+        await institution.save();
+        
+        return res.json({
+          message: 'Institution registered but not authorized on blockchain',
+          institution,
+          blockchainStatus: 'registered_not_authorized'
+        });
+      }
+    } catch (statsError) {
+      console.log('Institution not found on blockchain, proceeding with registration...');
+    }
+    
     if (institution.blockchainRegistered) {
       return res.status(400).json({ error: 'Institution already registered on blockchain' });
     }
     
     // Register on blockchain
-    const { blockchainService } = require('./lib/blockchain.js');
+    const { blockchainService } = await import('./lib/blockchain.js');
     await blockchainService.connectWallet();
     
     const txHash = await blockchainService.registerInstitution(
@@ -476,18 +514,264 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     // Update institution record
     institution.blockchainRegistered = true;
     institution.blockchainTxHash = txHash;
+     institution.blockchainRegistrationDate = new Date();
     institution.blockchainError = null;
     await institution.save();
     
     res.json({
       message: 'Institution registered on blockchain successfully',
       transactionHash: txHash,
-      institution
+      institution,
+      blockchainStatus: 'registered'
     });
     
   } catch (error) {
     console.error('Blockchain registration error:', error);
-    res.status(500).json({ error: 'Failed to register on blockchain' });
+    
+    // Update institution with error
+    const institution = await Institution.findById(institutionId);
+    if (institution) {
+      institution.blockchainError = error.message;
+      await institution.save();
+    }
+    
+    res.status(500).json({ 
+      error: 'Failed to register on blockchain',
+      details: error.message 
+    });
+  }
+});
+
+// NEW: Bulk blockchain registration for all verified institutions
+app.post('/api/admin/blockchain-register-all', isAdmin, async (req, res) => {
+  try {
+    // Find all verified institutions that aren't blockchain registered
+    const institutions = await Institution.find({ 
+      isVerified: true,
+      $or: [
+        { blockchainRegistered: { $ne: true } },
+        { blockchainRegistered: { $exists: false } }
+      ]
+    });
+
+    console.log(`Found ${institutions.length} institutions to register/authorize`);
+
+    const results = [];
+    let successCount = 0;
+    let errorCount = 0;
+
+    // Connect admin wallet once
+    const { blockchainService } = await import('./lib/blockchain.js');
+    await blockchainService.connectWallet();
+    console.log('Admin wallet connected');
+
+    for (const institution of institutions) {
+      try {
+        console.log(`Processing institution: ${institution.name}`);
+        
+        // Check if already registered on blockchain
+        try {
+          const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+          
+          if (stats.isAuthorized) {
+            console.log(`${institution.name} is already authorized on blockchain`);
+            institution.blockchainRegistered = true;
+            institution.blockchainAuthorized = true;
+            institution.blockchainError = null;
+            await institution.save();
+            
+            results.push({
+              institution: institution.name,
+              status: 'already_authorized',
+              message: 'Already authorized on blockchain'
+            });
+            successCount++;
+            continue;
+          }
+          
+          if (stats.registrationDate > 0) {
+            console.log(`${institution.name} is registered but not authorized`);
+            institution.blockchainRegistered = true;
+            institution.blockchainAuthorized = false;
+            await institution.save();
+            
+            results.push({
+              institution: institution.name,
+              status: 'registered_not_authorized',
+              message: 'Registered but not authorized'
+            });
+            successCount++;
+            continue;
+          }
+        } catch (statsError) {
+          console.log(`${institution.name} not found on blockchain, registering...`);
+        }
+        
+        // Register institution on blockchain
+        const txHash = await blockchainService.registerInstitution(
+          institution.name,
+          institution.email
+        );
+        
+        console.log(`✅ ${institution.name} registered on blockchain. TX: ${txHash}`);
+        
+                 // Update database
+         institution.blockchainRegistered = true;
+         institution.blockchainTxHash = txHash;
+         institution.blockchainRegistrationDate = new Date();
+         institution.blockchainError = null;
+         await institution.save();
+        
+        results.push({
+          institution: institution.name,
+          status: 'registered',
+          message: 'Successfully registered',
+          transactionHash: txHash
+        });
+        successCount++;
+        
+        // Wait a bit between transactions to avoid nonce issues
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+      } catch (error) {
+        console.error(`❌ Failed to register ${institution.name}:`, error.message);
+        institution.blockchainError = error.message;
+        await institution.save();
+        
+        results.push({
+          institution: institution.name,
+          status: 'error',
+          message: error.message
+        });
+        errorCount++;
+      }
+    }
+    
+    res.json({
+      message: 'Bulk blockchain registration complete',
+      summary: {
+        total: institutions.length,
+        successful: successCount,
+        errors: errorCount
+      },
+      results
+    });
+    
+  } catch (error) {
+    console.error('Bulk blockchain registration error:', error);
+    res.status(500).json({ 
+      error: 'Failed to perform bulk blockchain registration',
+      details: error.message 
+    });
+  }
+});
+
+// NEW: Get blockchain registration status for all institutions
+app.get('/api/admin/blockchain-status', isAdmin, async (req, res) => {
+  try {
+    const institutions = await Institution.find({ isVerified: true });
+    
+    const statusReport = [];
+    
+    for (const institution of institutions) {
+      try {
+        const { blockchainService } = await import('./lib/blockchain.js');
+        const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+        
+        statusReport.push({
+          id: institution._id,
+          name: institution.name,
+          email: institution.email,
+          walletAddress: institution.walletAddress,
+          backendVerified: institution.isVerified,
+          blockchainRegistered: institution.blockchainRegistered,
+          blockchainAuthorized: stats.isAuthorized,
+          blockchainStats: stats,
+          blockchainError: institution.blockchainError
+        });
+      } catch (error) {
+        statusReport.push({
+          id: institution._id,
+          name: institution.name,
+          email: institution.email,
+          walletAddress: institution.walletAddress,
+          backendVerified: institution.isVerified,
+          blockchainRegistered: institution.blockchainRegistered,
+          blockchainAuthorized: false,
+          blockchainStats: null,
+          blockchainError: error.message
+        });
+      }
+    }
+    
+    res.json({
+      totalInstitutions: institutions.length,
+      statusReport
+    });
+    
+  } catch (error) {
+    console.error('Blockchain status check error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// NEW: Authorize institution on blockchain (separate from registration)
+app.post('/api/admin/institutions/:institutionId/blockchain-authorize', isAdmin, async (req, res) => {
+  try {
+    const { institutionId } = req.params;
+    
+    const institution = await Institution.findById(institutionId);
+    if (!institution) {
+      return res.status(404).json({ error: 'Institution not found' });
+    }
+    
+    if (!institution.isVerified) {
+      return res.status(400).json({ error: 'Institution must be verified first' });
+    }
+    
+    if (!institution.blockchainRegistered) {
+      return res.status(400).json({ error: 'Institution must be registered on blockchain first' });
+    }
+    
+    // Authorize institution on blockchain
+    const { blockchainService } = await import('./lib/blockchain.js');
+    await blockchainService.connectWallet();
+    
+    try {
+      // Call authorize function on smart contract
+      const txHash = await blockchainService.authorizeInstitution(institution.walletAddress);
+      
+             // Update institution record
+       institution.blockchainAuthorized = true;
+       institution.blockchainAuthTxHash = txHash;
+       institution.blockchainAuthorizationDate = new Date();
+       institution.blockchainError = null;
+       await institution.save();
+      
+      res.json({
+        message: 'Institution authorized on blockchain successfully',
+        transactionHash: txHash,
+        institution,
+        blockchainStatus: 'authorized'
+      });
+      
+    } catch (authError) {
+      console.error('Blockchain authorization error:', authError);
+      institution.blockchainError = authError.message;
+      await institution.save();
+      
+      res.status(500).json({ 
+        error: 'Failed to authorize on blockchain',
+        details: authError.message 
+      });
+    }
+    
+  } catch (error) {
+    console.error('Blockchain authorization error:', error);
+    res.status(500).json({ 
+      error: 'Failed to authorize on blockchain',
+      details: error.message 
+    });
   }
 });
 
@@ -507,7 +791,7 @@ app.get('/api/institutions/:institutionId/blockchain-status', authenticateToken,
     }
     
     // Check blockchain status
-    const { blockchainService } = require('./lib/blockchain.js');
+     const { blockchainService } = await import('./lib/blockchain.js');
     
     try {
       const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
@@ -654,6 +938,14 @@ app.post('/api/certificates/issue', authenticateToken, upload.single('certificat
       certificate,
       contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068'
     });
+   } catch (error) {
+     console.error('Certificate issuance error:', error);
+     res.status(500).json({
+       error: 'Internal server error during certificate issuance'
+     });
+   }
+ });
+
 // Endpoint to update certificate after on-chain mint (called from frontend after successful mint)
 app.post('/api/certificates/:certificateId/onchain-mint', async (req, res) => {
   try {
@@ -679,13 +971,6 @@ app.post('/api/certificates/:certificateId/onchain-mint', async (req, res) => {
   } catch (error) {
     console.error('On-chain mint update error:', error);
     res.status(500).json({ error: 'Internal server error during on-chain mint update' });
-  }
-});
-  } catch (error) {
-    console.error('Certificate issuance error:', error);
-    res.status(500).json({
-      error: 'Internal server error during certificate issuance'
-    });
   }
 });
 // Check usage limits before certificate issuance
@@ -1091,6 +1376,33 @@ app.post('/api/certificates/:certificateId/mint', async (req, res) => {
     res.status(500).json({ error: 'Internal server error during minting' });
   }
 });
+// NEW: Get blockchain integration summary
+app.get('/api/admin/blockchain-summary', isAdmin, async (req, res) => {
+  try {
+    const totalInstitutions = await Institution.countDocuments();
+    const verifiedInstitutions = await Institution.countDocuments({ isVerified: true });
+    const blockchainRegistered = await Institution.countDocuments({ blockchainRegistered: true });
+    const blockchainAuthorized = await Institution.countDocuments({ blockchainAuthorized: true });
+    const pendingBlockchainRegistration = verifiedInstitutions - blockchainRegistered;
+    const pendingBlockchainAuthorization = blockchainRegistered - blockchainAuthorized;
+    
+    res.json({
+      summary: {
+        totalInstitutions,
+        verifiedInstitutions,
+        blockchainRegistered,
+        blockchainAuthorized,
+        pendingBlockchainRegistration,
+        pendingBlockchainAuthorization
+      },
+      status: 'OK'
+    });
+  } catch (error) {
+    console.error('Blockchain summary error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'OK', message: 'EduChain API is running' });
 });

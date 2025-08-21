@@ -397,7 +397,7 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
       
       // NEW: Register institution on blockchain
       try {
-        const { blockchainService } = await import('./lib/blockchain.js');
+        const { blockchainService } = require('./lib/blockchain.js');
         
         // Connect admin wallet (you'll need to set this up)
         await blockchainService.connectWallet();
@@ -463,7 +463,7 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     
          // Check if already registered on blockchain
      try {
-       const { blockchainService } = await import('./lib/blockchain.js');
+       const { blockchainService } = require('./lib/blockchain.js');
       await blockchainService.connectWallet();
       
       const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
@@ -503,7 +503,7 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     }
     
     // Register on blockchain
-    const { blockchainService } = await import('./lib/blockchain.js');
+    const { blockchainService } = require('./lib/blockchain.js');
     await blockchainService.connectWallet();
     
     const txHash = await blockchainService.registerInstitution(

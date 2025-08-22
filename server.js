@@ -29,12 +29,24 @@ const PORT = process.env.PORT || 5000;
 
 // Middleware
 app.use(cors({
-  origin: process.env.FRONTEND_URL || 'http://localhost:5000', // Add your frontend URL
+  origin: [
+    'http://localhost:5000',
+    'http://localhost:3000',
+    'https://educhain-frontend.vercel.app',
+    'https://educhain-frontend-git-main.vercel.app',
+    process.env.FRONTEND_URL
+  ].filter(Boolean), // Remove undefined values
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email']
+  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email', 'Content-Length', 'X-Requested-With']
 }));
 app.use(express.json());
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin} - Admin-Email: ${req.headers['admin-email']}`);
+  next();
+});
 
 // Multer setup for file uploads
 const storage = multer.memoryStorage();
@@ -120,9 +132,11 @@ const authenticateToken = (req, res, next) => {
 const isAdmin = (req, res, next) => {
   // In production, implement proper admin authentication
   const adminEmail = req.headers['admin-email'];
+  console.log('Admin check - Email:', adminEmail, 'Headers:', req.headers);
   if (adminEmail === 'admin@educhain.com') {
     next();
   } else {
+    console.log('Admin access denied for email:', adminEmail);
     res.status(403).json({ error: 'Admin access required' });
   }
 };
@@ -561,7 +575,7 @@ app.post('/api/admin/blockchain-register-all', isAdmin, async (req, res) => {
     let errorCount = 0;
 
     // Connect admin wallet once
-    const { blockchainService } = await import('./lib/blockchain.js');
+    const { blockchainService } = require('./lib/blockchain.js');
     await blockchainService.connectWallet();
     console.log('Admin wallet connected');
 
@@ -674,9 +688,9 @@ app.get('/api/admin/blockchain-status', isAdmin, async (req, res) => {
     const statusReport = [];
     
     for (const institution of institutions) {
-      try {
-        const { blockchainService } = await import('./lib/blockchain.js');
-        const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+              try {
+          const { blockchainService } = require('./lib/blockchain.js');
+          const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
         
         statusReport.push({
           id: institution._id,
@@ -734,7 +748,7 @@ app.post('/api/admin/institutions/:institutionId/blockchain-authorize', isAdmin,
     }
     
     // Authorize institution on blockchain
-    const { blockchainService } = await import('./lib/blockchain.js');
+    const { blockchainService } = require('./lib/blockchain.js');
     await blockchainService.connectWallet();
     
     try {
@@ -791,7 +805,7 @@ app.get('/api/institutions/:institutionId/blockchain-status', authenticateToken,
     }
     
     // Check blockchain status
-     const { blockchainService } = await import('./lib/blockchain.js');
+     const { blockchainService } = require('./lib/blockchain.js');
     
     try {
       const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
@@ -1407,6 +1421,22 @@ app.get('/api/health', (_req, res) => {
   res.json({ status: 'OK', message: 'EduChain API is running' });
 });
 
+// Global error handler to catch any unhandled errors
+app.use((err, req, res, next) => {
+  console.error('Global error handler caught:', err);
+  res.status(500).json({ 
+    error: 'Internal server error',
+    message: err.message,
+    stack: process.env.NODE_ENV === 'development' ? err.stack : undefined
+  });
+});
+
+// 404 handler for unmatched routes
+app.use('*', (req, res) => {
+  console.log('404 - Route not found:', req.originalUrl);
+  res.status(404).json({ error: 'Route not found' });
+});
+
 // Serve static files from React build (for production)
 if (process.env.NODE_ENV === 'production') {
   app.use(express.static(path.join(__dirname, '../frontend/build')));
@@ -1420,4 +1450,11 @@ if (process.env.NODE_ENV === 'production') {
 app.listen(PORT, () => {
   console.log(`EduChain API server running on port ${PORT}`);
   console.log(`Health check: http://localhost:${PORT}/api/health`);
+  console.log('CORS origins allowed:', [
+    'http://localhost:5000',
+    'http://localhost:3000',
+    'https://educhain-frontend.vercel.app',
+    'https://educhain-frontend-git-main.vercel.app',
+    process.env.FRONTEND_URL
+  ].filter(Boolean));
 });

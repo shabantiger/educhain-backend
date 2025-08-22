@@ -40,9 +40,60 @@ app.use(cors({
   ].filter(Boolean), // Remove undefined values
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email', 'Content-Length', 'X-Requested-With', 'Origin', 'Accept']
+  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email', 'Content-Length', 'X-Requested-With', 'Origin', 'Accept'],
+  optionsSuccessStatus: 200 // Some legacy browsers (IE11, various SmartTVs) choke on 204
 }));
+
+// Add preflight handler for all routes
+app.options('*', cors());
 app.use(express.json());
+
+// Global error handler to ensure JSON responses
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err);
+  
+  // Ensure we always return JSON
+  res.setHeader('Content-Type', 'application/json');
+  
+  if (err.name === 'ValidationError') {
+    return res.status(400).json({ error: 'Validation error', details: err.message });
+  }
+  
+  if (err.name === 'CastError') {
+    return res.status(400).json({ error: 'Invalid ID format' });
+  }
+  
+  if (err.code === 11000) {
+    return res.status(400).json({ error: 'Duplicate field value' });
+  }
+  
+  return res.status(500).json({ error: 'Internal server error' });
+});
+
+// 404 handler for unmatched routes
+app.use('*', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.status(404).json({ error: 'Route not found', path: req.originalUrl });
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    message: 'EduChain backend is running'
+  });
+});
+
+// Test admin endpoint
+app.get('/api/admin/test', isAdmin, (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    message: 'Admin authentication working',
+    timestamp: new Date().toISOString(),
+    adminEmail: req.headers['admin-email']
+  });
+});
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -134,14 +185,26 @@ const authenticateToken = (req, res, next) => {
 
 // Middleware to check if user is admin (for verification purposes)
 const isAdmin = (req, res, next) => {
-  // In production, implement proper admin authentication
-  const adminEmail = req.headers['admin-email'];
-  console.log('Admin check - Email:', adminEmail, 'Headers:', req.headers);
-  if (adminEmail === 'admin@educhain.com') {
-    next();
-  } else {
-    console.log('Admin access denied for email:', adminEmail);
-    res.status(403).json({ error: 'Admin access required' });
+  try {
+    // In production, implement proper admin authentication
+    const adminEmail = req.headers['admin-email'];
+    console.log('Admin check - Email:', adminEmail, 'Headers:', req.headers);
+    
+    if (!adminEmail) {
+      console.log('Admin access denied: No admin-email header');
+      return res.status(403).json({ error: 'Admin access required - admin-email header missing' });
+    }
+    
+    if (adminEmail === 'admin@educhain.com') {
+      console.log('Admin access granted for:', adminEmail);
+      next();
+    } else {
+      console.log('Admin access denied for email:', adminEmail);
+      return res.status(403).json({ error: 'Admin access required - invalid admin email' });
+    }
+  } catch (error) {
+    console.error('Admin middleware error:', error);
+    return res.status(500).json({ error: 'Internal server error in admin authentication' });
   }
 };
 
@@ -438,17 +501,21 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
         await blockchainService.connectWallet();
         
         // Register institution on blockchain
-        const txHash = await blockchainService.registerInstitution(
+        const registrationResult = await blockchainService.registerInstitution(
           institution.name,
           institution.email
         );
         
-        console.log(`Institution ${institution.name} registered on blockchain. TX: ${txHash}`);
-        
-        // Store blockchain registration info
-        institution.blockchainRegistered = true;
-        institution.blockchainTxHash = txHash;
-        institution.blockchainRegistrationDate = new Date();
+        if (registrationResult.alreadyRegistered) {
+          console.log(`Institution ${institution.name} already registered on blockchain`);
+          institution.blockchainRegistered = true;
+          institution.blockchainError = null;
+        } else {
+          console.log(`Institution ${institution.name} registered on blockchain. TX: ${registrationResult.transactionHash}`);
+          institution.blockchainRegistered = true;
+          institution.blockchainTxHash = registrationResult.transactionHash;
+          institution.blockchainRegistrationDate = new Date();
+        }
         
       } catch (blockchainError) {
         console.error('Failed to register institution on blockchain:', blockchainError);
@@ -559,24 +626,37 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     
     await blockchainService.connectWallet();
     
-    const txHash = await blockchainService.registerInstitution(
+    const registrationResult = await blockchainService.registerInstitution(
       institution.name,
       institution.email
     );
     
-    // Update institution record
-    institution.blockchainRegistered = true;
-    institution.blockchainTxHash = txHash;
-     institution.blockchainRegistrationDate = new Date();
-    institution.blockchainError = null;
-    await institution.save();
-    
-    res.json({
-      message: 'Institution registered on blockchain successfully',
-      transactionHash: txHash,
-      institution,
-      blockchainStatus: 'registered'
-    });
+    if (registrationResult.alreadyRegistered) {
+      // Update institution record for already registered
+      institution.blockchainRegistered = true;
+      institution.blockchainError = null;
+      await institution.save();
+      
+      res.json({
+        message: 'Institution already registered on blockchain',
+        institution,
+        blockchainStatus: 'already_registered'
+      });
+    } else {
+      // Update institution record for new registration
+      institution.blockchainRegistered = true;
+      institution.blockchainTxHash = registrationResult.transactionHash;
+      institution.blockchainRegistrationDate = new Date();
+      institution.blockchainError = null;
+      await institution.save();
+      
+      res.json({
+        message: 'Institution registered on blockchain successfully',
+        transactionHash: registrationResult.transactionHash,
+        institution,
+        blockchainStatus: 'registered'
+      });
+    }
     
   } catch (error) {
     console.error('Blockchain registration error:', error);
@@ -728,26 +808,41 @@ app.post('/api/admin/blockchain-register-all', isAdmin, async (req, res) => {
         }
         
         // Register institution on blockchain
-        const txHash = await blockchainService.registerInstitution(
+        const registrationResult = await blockchainService.registerInstitution(
           institution.name,
           institution.email
         );
         
-        console.log(`✅ ${institution.name} registered on blockchain. TX: ${txHash}`);
-        
-                 // Update database
-         institution.blockchainRegistered = true;
-         institution.blockchainTxHash = txHash;
-         institution.blockchainRegistrationDate = new Date();
-         institution.blockchainError = null;
-         await institution.save();
-        
-        results.push({
-          institution: institution.name,
-          status: 'registered',
-          message: 'Successfully registered',
-          transactionHash: txHash
-        });
+        if (registrationResult.alreadyRegistered) {
+          console.log(`✅ ${institution.name} already registered on blockchain`);
+          
+          // Update database
+          institution.blockchainRegistered = true;
+          institution.blockchainError = null;
+          await institution.save();
+          
+          results.push({
+            institution: institution.name,
+            status: 'already_registered',
+            message: 'Already registered on blockchain'
+          });
+        } else {
+          console.log(`✅ ${institution.name} registered on blockchain. TX: ${registrationResult.transactionHash}`);
+          
+          // Update database
+          institution.blockchainRegistered = true;
+          institution.blockchainTxHash = registrationResult.transactionHash;
+          institution.blockchainRegistrationDate = new Date();
+          institution.blockchainError = null;
+          await institution.save();
+          
+          results.push({
+            institution: institution.name,
+            status: 'registered',
+            message: 'Successfully registered',
+            transactionHash: registrationResult.transactionHash
+          });
+        }
         successCount++;
         
         // Wait a bit between transactions to avoid nonce issues

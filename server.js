@@ -1083,9 +1083,52 @@ app.get('/api/certificates/institution', authenticateToken, async (req, res) => 
 app.get('/api/certificates/wallet/:walletAddress', async (req, res) => {
   try {
     const { walletAddress } = req.params;
-    const certs = await Certificate.find({ studentAddress: new RegExp(`^${walletAddress}$`, 'i') });
-    res.json({ certificates: certs });
+    
+    if (!walletAddress) {
+      return res.status(400).json({ error: 'Wallet address is required' });
+    }
+    
+    console.log(`Fetching certificates for wallet: ${walletAddress}`);
+    
+    const certs = await Certificate.find({ 
+      studentAddress: new RegExp(`^${walletAddress}$`, 'i') 
+    }).populate('issuedBy', 'name email');
+    
+    console.log(`Found ${certs.length} certificates for wallet ${walletAddress}`);
+    
+    // Format certificates for frontend
+    const formattedCerts = certs.map(cert => ({
+      id: cert._id,
+      studentAddress: cert.studentAddress,
+      studentName: cert.studentName,
+      courseName: cert.courseName,
+      grade: cert.grade,
+      ipfsHash: cert.ipfsHash,
+      completionDate: cert.completionDate,
+      certificateType: cert.certificateType,
+      issuedBy: cert.issuedBy,
+      institutionName: cert.institutionName,
+      issuedAt: cert.issuedAt,
+      isValid: cert.isValid,
+      isMinted: cert.isMinted,
+      tokenId: cert.tokenId,
+      mintedTo: cert.mintedTo,
+      mintedAt: cert.mintedAt,
+      // Add verification URLs
+      verificationUrls: {
+        byId: `/api/certificates/verify/${cert._id}`,
+        byIPFS: `/api/certificates/verify/ipfs/${cert.ipfsHash}`,
+        byToken: cert.tokenId ? `/api/certificates/verify/token/${cert.tokenId}` : null
+      }
+    }));
+    
+    res.json({ 
+      certificates: formattedCerts,
+      total: formattedCerts.length,
+      walletAddress: walletAddress
+    });
   } catch (err) {
+    console.error('Error fetching certificates by wallet:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1107,6 +1150,66 @@ app.get('/api/certificates/verify/:id', async (req, res) => {
     }
     res.json({ valid: true, certificate: cert, contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226' });
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify certificate by IPFS hash
+app.get('/api/certificates/verify/ipfs/:ipfsHash', async (req, res) => {
+  try {
+    const { ipfsHash } = req.params;
+    
+    if (!ipfsHash) {
+      return res.status(400).json({ error: 'IPFS hash is required' });
+    }
+    
+    const cert = await Certificate.findOne({ ipfsHash: ipfsHash });
+    
+    if (!cert) {
+      return res.status(404).json({ 
+        error: 'Certificate not found for this IPFS hash',
+        ipfsHash: ipfsHash
+      });
+    }
+    
+    res.json({ 
+      valid: true, 
+      certificate: cert, 
+      contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226',
+      verificationMethod: 'ipfs_hash'
+    });
+  } catch (err) {
+    console.error('IPFS verification error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Verify certificate by token ID
+app.get('/api/certificates/verify/token/:tokenId', async (req, res) => {
+  try {
+    const { tokenId } = req.params;
+    
+    if (!tokenId || isNaN(parseInt(tokenId))) {
+      return res.status(400).json({ error: 'Valid token ID is required' });
+    }
+    
+    const cert = await Certificate.findOne({ tokenId: parseInt(tokenId, 10) });
+    
+    if (!cert) {
+      return res.status(404).json({ 
+        error: 'Certificate not found for this token ID',
+        tokenId: tokenId
+      });
+    }
+    
+    res.json({ 
+      valid: true, 
+      certificate: cert, 
+      contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226',
+      verificationMethod: 'token_id'
+    });
+  } catch (err) {
+    console.error('Token verification error:', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1392,16 +1495,6 @@ app.get('/api/admin/verification-requests', isAdmin, async (_req, res) => {
 });
 
 // Public endpoints (no authentication required)
-// Get certificates by wallet address (student)
-app.get('/api/certificates/wallet/:walletAddress', async (req, res) => {
-  try {
-    const { walletAddress } = req.params;
-    const certs = await Certificate.find({ studentAddress: new RegExp(`^${walletAddress}$`, 'i') });
-    res.json({ certificates: certs });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
 
 // Student: Mint certificate to wallet (no JWT required, wallet connects directly)
 app.post('/api/certificates/:certificateId/mint', async (req, res) => {
@@ -1483,7 +1576,17 @@ app.get('/', (_req, res) => {
 });
 
 app.get('/api/health', (_req, res) => {
-  res.json({ status: 'OK', message: 'EduChain API is running' });
+  res.json({ 
+    status: 'OK', 
+    message: 'EduChain API is running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      certificates: '/api/certificates',
+      verification: '/api/certificates/verify',
+      admin: '/api/admin',
+      health: '/api/health'
+    }
+  });
 });
 
 // Global error handler to catch any unhandled errors

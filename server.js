@@ -600,9 +600,10 @@ app.get('/api/blockchain/config', async (req, res) => {
   try {
     const config = {
       contractAddress: process.env.CONTRACT_ADDRESS || '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068',
-      rpcUrl: process.env.ETHEREUM_RPC_URL || 'https://sepolia.infura.io/v3/your-project-id',
+      rpcUrl: process.env.BASE_MAINNET_RPC_URL || 'https://mainnet.base.org',
       hasABI: true, // We have the ABI in the frontend
-      network: process.env.NETWORK || 'sepolia'
+      network: 'base-mainnet',
+      chainId: 8453
     };
     
     res.json(config);
@@ -614,12 +615,11 @@ app.get('/api/blockchain/config', async (req, res) => {
 
 app.get('/api/blockchain/network', async (req, res) => {
   try {
-    const network = process.env.NETWORK || 'sepolia';
-    const chainId = network === 'mainnet' ? 1 : network === 'sepolia' ? 11155111 : 31337;
-    
     res.json({
-      chainId,
-      name: network === 'mainnet' ? 'Ethereum Mainnet' : network === 'sepolia' ? 'Sepolia Testnet' : 'Local Network'
+      chainId: 8453,
+      name: 'Base Mainnet',
+      network: 'base-mainnet',
+      explorer: 'https://basescan.org'
     });
   } catch (error) {
     console.error('Error fetching network info:', error);
@@ -1035,7 +1035,7 @@ app.post('/api/certificates/issue', authenticateToken, upload.single('certificat
     console.log('IPFS Hash:', ipfsHash);
     // Always set issuedAt to now
     const issuedAt = new Date();
-    // Save certificate to MongoDB WITHOUT tokenId (wait for on-chain mint)
+    // Save certificate to MongoDB first
     const certificate = new Certificate({
       studentAddress,
       studentName,
@@ -1052,10 +1052,72 @@ app.post('/api/certificates/issue', authenticateToken, upload.single('certificat
       mintedTo: ""
     });
     await certificate.save();
-    console.log('Certificate created and saved (pre-mint):', certificate);
+    console.log('Certificate created and saved to database:', certificate);
+
+    // Now mint on blockchain if student address is provided
+    let blockchainResult = null;
+    if (studentAddress && studentAddress.trim() !== '') {
+      try {
+        console.log('Attempting to mint certificate on blockchain...');
+        
+        // Import blockchain service
+        let blockchainService;
+        try {
+          const blockchainModule = await import('./lib/blockchain.js');
+          blockchainService = blockchainModule.blockchainService;
+        } catch (importError) {
+          console.error('Blockchain service not available:', importError.message);
+          throw new Error('Blockchain service not configured');
+        }
+
+        // Connect to blockchain
+        await blockchainService.connectWallet();
+
+        // Mint certificate on blockchain
+        blockchainResult = await blockchainService.issueCertificate(
+          studentAddress,
+          studentName,
+          courseName,
+          grade || 'N/A',
+          ipfsHash,
+          completionDate ? new Date(completionDate).getTime() / 1000 : Math.floor(Date.now() / 1000),
+          certificateType || 'Academic'
+        );
+
+        // Update certificate with blockchain data
+        certificate.tokenId = blockchainResult.tokenId;
+        certificate.isMinted = true;
+        certificate.mintedTo = studentAddress;
+        certificate.blockchainTxHash = blockchainResult.transactionHash;
+        certificate.blockchainBlockNumber = blockchainResult.blockNumber;
+        await certificate.save();
+
+        console.log('Certificate successfully minted on blockchain:', blockchainResult);
+
+      } catch (blockchainError) {
+        console.error('Failed to mint certificate on blockchain:', blockchainError);
+        
+        // Certificate is still saved in database, but blockchain minting failed
+        certificate.blockchainError = blockchainError.message;
+        await certificate.save();
+        
+        // Continue with response, but indicate blockchain failure
+        return res.json({
+          message: 'Certificate issued successfully in database, but blockchain minting failed.',
+          certificate,
+          blockchainError: blockchainError.message,
+          contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068'
+        });
+      }
+    }
+
+    // Success response
     res.json({
-      message: 'Certificate issued successfully. Please mint on-chain from frontend.',
+      message: blockchainResult 
+        ? 'Certificate issued and minted on blockchain successfully!' 
+        : 'Certificate issued successfully in database (no student wallet for blockchain minting).',
       certificate,
+      blockchainResult,
       contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068'
     });
    } catch (error) {
@@ -1193,6 +1255,8 @@ app.get('/api/certificates/verify/:id', async (req, res) => {
   try {
     const { id } = req.params;
     let cert = null;
+    let blockchainVerification = null;
+    
     // Try to find by ObjectId
     if (/^[0-9a-fA-F]{24}$/.test(id)) {
       cert = await Certificate.findById(id);
@@ -1201,10 +1265,43 @@ app.get('/api/certificates/verify/:id', async (req, res) => {
     if (!cert && /^\d+$/.test(id)) {
       cert = await Certificate.findOne({ tokenId: parseInt(id, 10) });
     }
+    
     if (!cert) {
       return res.status(404).json({ error: 'Certificate not found' });
     }
-    res.json({ valid: true, certificate: cert, contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226' });
+
+    // If certificate is minted, verify on blockchain
+    if (cert.isMinted && cert.tokenId) {
+      try {
+        const blockchainModule = await import('./lib/blockchain.js');
+        const blockchainService = blockchainModule.blockchainService;
+        
+        blockchainVerification = await blockchainService.verifyCertificate(cert.tokenId);
+        
+        // Check if blockchain verification matches database
+        if (blockchainVerification.exists) {
+          const blockchainCert = blockchainVerification.certificate;
+          const isValidOnChain = blockchainCert.isValid;
+          
+          // Update database if blockchain shows different validity
+          if (cert.isValid !== isValidOnChain) {
+            cert.isValid = isValidOnChain;
+            await cert.save();
+          }
+        }
+      } catch (blockchainError) {
+        console.error('Blockchain verification failed:', blockchainError);
+        blockchainVerification = { error: blockchainError.message };
+      }
+    }
+
+    res.json({ 
+      valid: true, 
+      certificate: cert, 
+      blockchainVerification,
+      contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068',
+      verificationMethod: cert.isMinted ? 'database_and_blockchain' : 'database_only'
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1220,6 +1317,7 @@ app.get('/api/certificates/verify/ipfs/:ipfsHash', async (req, res) => {
     }
     
     const cert = await Certificate.findOne({ ipfsHash: ipfsHash });
+    let blockchainVerification = null;
     
     if (!cert) {
       return res.status(404).json({ 
@@ -1227,12 +1325,42 @@ app.get('/api/certificates/verify/ipfs/:ipfsHash', async (req, res) => {
         ipfsHash: ipfsHash
       });
     }
+
+    // Always try to verify on blockchain by IPFS hash
+    try {
+      const blockchainModule = await import('./lib/blockchain.js');
+      const blockchainService = blockchainModule.blockchainService;
+      
+      blockchainVerification = await blockchainService.verifyCertificateByIPFS(ipfsHash);
+      
+      // If found on blockchain but not in database, or vice versa
+      if (blockchainVerification.exists && !cert.isMinted) {
+        // Certificate exists on blockchain but not marked as minted in database
+        cert.isMinted = true;
+        cert.tokenId = blockchainVerification.tokenId;
+        cert.mintedTo = cert.studentAddress;
+        await cert.save();
+      }
+      
+      // Update validity based on blockchain
+      if (blockchainVerification.exists) {
+        const blockchainCert = blockchainVerification.certificate;
+        if (cert.isValid !== blockchainCert.isValid) {
+          cert.isValid = blockchainCert.isValid;
+          await cert.save();
+        }
+      }
+    } catch (blockchainError) {
+      console.error('Blockchain verification failed:', blockchainError);
+      blockchainVerification = { error: blockchainError.message };
+    }
     
     res.json({ 
       valid: true, 
       certificate: cert, 
-      contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226',
-      verificationMethod: 'ipfs_hash'
+      blockchainVerification,
+      contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068',
+      verificationMethod: 'ipfs_hash_and_blockchain'
     });
   } catch (err) {
     console.error('IPFS verification error:', err);
@@ -1250,6 +1378,7 @@ app.get('/api/certificates/verify/token/:tokenId', async (req, res) => {
     }
     
     const cert = await Certificate.findOne({ tokenId: parseInt(tokenId, 10) });
+    let blockchainVerification = null;
     
     if (!cert) {
       return res.status(404).json({ 
@@ -1257,12 +1386,33 @@ app.get('/api/certificates/verify/token/:tokenId', async (req, res) => {
         tokenId: tokenId
       });
     }
+
+    // Always verify on blockchain by token ID
+    try {
+      const blockchainModule = await import('./lib/blockchain.js');
+      const blockchainService = blockchainModule.blockchainService;
+      
+      blockchainVerification = await blockchainService.verifyCertificate(parseInt(tokenId, 10));
+      
+      // Update validity based on blockchain
+      if (blockchainVerification.exists) {
+        const blockchainCert = blockchainVerification.certificate;
+        if (cert.isValid !== blockchainCert.isValid) {
+          cert.isValid = blockchainCert.isValid;
+          await cert.save();
+        }
+      }
+    } catch (blockchainError) {
+      console.error('Blockchain verification failed:', blockchainError);
+      blockchainVerification = { error: blockchainError.message };
+    }
     
     res.json({ 
       valid: true, 
       certificate: cert, 
-      contractAddress: '0xd2a44c2f0b05fc3b3b348083ad7f542bbad8a226',
-      verificationMethod: 'token_id'
+      blockchainVerification,
+      contractAddress: '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068',
+      verificationMethod: 'token_id_and_blockchain'
     });
   } catch (err) {
     console.error('Token verification error:', err);
@@ -1281,6 +1431,61 @@ app.get('/api/certificates/token/:tokenId', async (req, res) => {
     res.json({ certificate: cert });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Revoke certificate (admin only)
+app.post('/api/certificates/:certificateId/revoke', authenticateToken, async (req, res) => {
+  try {
+    const { certificateId } = req.params;
+    
+    // Check if user is admin
+    if (req.user.role !== 'admin') {
+      return res.status(403).json({ error: 'Admin access required' });
+    }
+    
+    const certificate = await Certificate.findById(certificateId);
+    if (!certificate) {
+      return res.status(404).json({ error: 'Certificate not found' });
+    }
+    
+    // Update database
+    certificate.isValid = false;
+    certificate.revokedAt = new Date();
+    certificate.revokedBy = req.user.id;
+    await certificate.save();
+    
+    // Revoke on blockchain if minted
+    let blockchainResult = null;
+    if (certificate.isMinted && certificate.tokenId) {
+      try {
+        const blockchainModule = await import('./lib/blockchain.js');
+        const blockchainService = blockchainModule.blockchainService;
+        
+        await blockchainService.connectWallet();
+        blockchainResult = await blockchainService.revokeCertificate(certificate.tokenId);
+        
+        // Update certificate with blockchain revocation info
+        certificate.blockchainRevokeTxHash = blockchainResult.transactionHash;
+        certificate.blockchainRevokeBlockNumber = blockchainResult.blockNumber;
+        await certificate.save();
+        
+      } catch (blockchainError) {
+        console.error('Failed to revoke certificate on blockchain:', blockchainError);
+        certificate.blockchainRevokeError = blockchainError.message;
+        await certificate.save();
+      }
+    }
+    
+    res.json({
+      message: 'Certificate revoked successfully',
+      certificate,
+      blockchainResult
+    });
+    
+  } catch (error) {
+    console.error('Certificate revocation error:', error);
+    res.status(500).json({ error: 'Failed to revoke certificate' });
   }
 });
 app.post('/api/certificates', async (req, res) => {

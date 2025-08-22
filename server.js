@@ -44,7 +44,9 @@ app.use(express.json());
 
 // Request logging middleware
 app.use((req, res, next) => {
-  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin} - Admin-Email: ${req.headers['admin-email']}`);
+  const adminEmail = req.headers['admin-email'];
+  const allHeaders = Object.keys(req.headers).map(key => `${key}: ${req.headers[key]}`).join(', ');
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.path} - Origin: ${req.headers.origin} - Admin-Email: ${adminEmail || 'undefined'} - All Headers: ${allHeaders}`);
   next();
 });
 
@@ -1415,6 +1417,21 @@ app.get('/api/admin/blockchain-summary', isAdmin, async (req, res) => {
     console.error('Blockchain summary error:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
+});
+
+// Root route handler
+app.get('/', (_req, res) => {
+  res.json({ 
+    status: 'OK', 
+    message: 'EduChain API is running',
+    version: '1.0.0',
+    endpoints: {
+      health: '/api/health',
+      institutions: '/api/institutions',
+      certificates: '/api/certificates',
+      subscription: '/api/subscription'
+    }
+  });
 });
 
 app.get('/api/health', (_req, res) => {

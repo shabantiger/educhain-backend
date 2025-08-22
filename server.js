@@ -32,13 +32,15 @@ app.use(cors({
   origin: [
     'http://localhost:5000',
     'http://localhost:3000',
+    'http://localhost:5173', // Vite dev server
+    'http://localhost:4173', // Vite preview
     'https://educhain-frontend.vercel.app',
     'https://educhain-frontend-git-main.vercel.app',
     process.env.FRONTEND_URL
   ].filter(Boolean), // Remove undefined values
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email', 'Content-Length', 'X-Requested-With']
+  allowedHeaders: ['Content-Type', 'Authorization', 'admin-email', 'Content-Length', 'X-Requested-With', 'Origin', 'Accept']
 }));
 app.use(express.json());
 
@@ -413,7 +415,24 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
       
       // NEW: Register institution on blockchain
       try {
-        const { blockchainService } = require('./lib/blockchain.js');
+        // Check if blockchain service exists
+        let blockchainService;
+        try {
+          const blockchainModule = await import('./lib/blockchain.js');
+          blockchainService = blockchainModule.blockchainService;
+        } catch (importError) {
+          console.error('Blockchain service not available:', importError.message);
+          // Allow backend verification but flag for manual blockchain registration
+          institution.blockchainRegistered = false;
+          institution.blockchainError = 'Blockchain service not configured';
+          await institution.save();
+          return res.json({
+            message: `Verification request ${status}`,
+            institution,
+            blockchainRegistered: false,
+            blockchainError: 'Blockchain service not configured'
+          });
+        }
         
         // Connect admin wallet (you'll need to set this up)
         await blockchainService.connectWallet();
@@ -429,16 +448,12 @@ app.post('/api/admin/verification-requests/:requestId/review', isAdmin, async (r
         // Store blockchain registration info
         institution.blockchainRegistered = true;
         institution.blockchainTxHash = txHash;
-         institution.blockchainRegistrationDate = new Date();
+        institution.blockchainRegistrationDate = new Date();
         
       } catch (blockchainError) {
         console.error('Failed to register institution on blockchain:', blockchainError);
         
-        // You can either:
-        // 1. Fail the entire verification
-        // return res.status(500).json({ error: 'Failed to register on blockchain' });
-        
-        // 2. Or allow backend verification but flag for manual blockchain registration
+        // Allow backend verification but flag for manual blockchain registration
         institution.blockchainRegistered = false;
         institution.blockchainError = blockchainError.message;
       }
@@ -479,10 +494,21 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     
          // Check if already registered on blockchain
      try {
-       const { blockchainService } = require('./lib/blockchain.js');
-      await blockchainService.connectWallet();
-      
-      const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
+       let blockchainService;
+       try {
+         const blockchainModule = await import('./lib/blockchain.js');
+         blockchainService = blockchainModule.blockchainService;
+       } catch (importError) {
+         console.error('Blockchain service not available:', importError.message);
+         return res.status(500).json({ 
+           error: 'Blockchain service not configured',
+           details: 'Please configure the blockchain service before checking blockchain status'
+         });
+       }
+       
+       await blockchainService.connectWallet();
+       
+       const stats = await blockchainService.getInstitutionStats(institution.walletAddress);
       
       if (stats.isAuthorized) {
         // Update database to reflect blockchain status
@@ -519,7 +545,18 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
     }
     
     // Register on blockchain
-    const { blockchainService } = require('./lib/blockchain.js');
+    let blockchainService;
+    try {
+      const blockchainModule = await import('./lib/blockchain.js');
+      blockchainService = blockchainModule.blockchainService;
+    } catch (importError) {
+      console.error('Blockchain service not available:', importError.message);
+      return res.status(500).json({ 
+        error: 'Blockchain service not configured',
+        details: 'Please configure the blockchain service before registering institutions'
+      });
+    }
+    
     await blockchainService.connectWallet();
     
     const txHash = await blockchainService.registerInstitution(
@@ -577,7 +614,18 @@ app.post('/api/admin/blockchain-register-all', isAdmin, async (req, res) => {
     let errorCount = 0;
 
     // Connect admin wallet once
-    const { blockchainService } = require('./lib/blockchain.js');
+    let blockchainService;
+    try {
+      const blockchainModule = await import('./lib/blockchain.js');
+      blockchainService = blockchainModule.blockchainService;
+    } catch (importError) {
+      console.error('Blockchain service not available:', importError.message);
+      return res.status(500).json({ 
+        error: 'Blockchain service not configured',
+        details: 'Please configure the blockchain service before performing bulk registration'
+      });
+    }
+    
     await blockchainService.connectWallet();
     console.log('Admin wallet connected');
 

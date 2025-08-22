@@ -595,6 +595,62 @@ app.post('/api/admin/institutions/:institutionId/blockchain-register', isAdmin, 
   }
 });
 
+// Blockchain configuration endpoints
+app.get('/api/blockchain/config', async (req, res) => {
+  try {
+    const config = {
+      contractAddress: process.env.CONTRACT_ADDRESS || '0xBD4228241dc6BC14C027bF8B6A24f97bc9872068',
+      rpcUrl: process.env.ETHEREUM_RPC_URL || 'https://sepolia.infura.io/v3/your-project-id',
+      hasABI: true, // We have the ABI in the frontend
+      network: process.env.NETWORK || 'sepolia'
+    };
+    
+    res.json(config);
+  } catch (error) {
+    console.error('Error fetching blockchain config:', error);
+    res.status(500).json({ error: 'Failed to fetch blockchain configuration' });
+  }
+});
+
+app.get('/api/blockchain/network', async (req, res) => {
+  try {
+    const network = process.env.NETWORK || 'sepolia';
+    const chainId = network === 'mainnet' ? 1 : network === 'sepolia' ? 11155111 : 31337;
+    
+    res.json({
+      chainId,
+      name: network === 'mainnet' ? 'Ethereum Mainnet' : network === 'sepolia' ? 'Sepolia Testnet' : 'Local Network'
+    });
+  } catch (error) {
+    console.error('Error fetching network info:', error);
+    res.status(500).json({ error: 'Failed to fetch network information' });
+  }
+});
+
+// Institution blockchain status endpoint
+app.get('/api/institutions/:institutionId/blockchain-status', async (req, res) => {
+  try {
+    const { institutionId } = req.params;
+    
+    const institution = await Institution.findById(institutionId);
+    if (!institution) {
+      return res.status(404).json({ error: 'Institution not found' });
+    }
+    
+    res.json({
+      institutionId,
+      blockchainRegistered: institution.blockchainRegistered || false,
+      blockchainAuthorized: institution.blockchainAuthorized || false,
+      blockchainError: institution.blockchainError || null,
+      blockchainTxHash: institution.blockchainTxHash || null,
+      blockchainRegistrationDate: institution.blockchainRegistrationDate || null
+    });
+  } catch (error) {
+    console.error('Error fetching blockchain status:', error);
+    res.status(500).json({ error: 'Failed to fetch blockchain status' });
+  }
+});
+
 // NEW: Bulk blockchain registration for all verified institutions
 app.post('/api/admin/blockchain-register-all', isAdmin, async (req, res) => {
   try {

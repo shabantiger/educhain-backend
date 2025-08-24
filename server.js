@@ -34,8 +34,8 @@ app.use(cors({
     'http://localhost:3000',
     'http://localhost:5173', // Vite dev server
     'http://localhost:4173', // Vite preview
-    'educhain-ay1yzm1pd-educhain-devs-projects.vercel.app',
-    'https://educhain-frontend-git-main.vercel.app',
+    'https://educhain-kldj23n6e-educhain-devs-projects.vercel.app', // Current Vercel domain
+    'https://educhain-rho.vercel.app', // Your main Vercel domain
     process.env.FRONTEND_URL
   ].filter(Boolean), // Remove undefined values
   credentials: true,
@@ -46,6 +46,22 @@ app.use(cors({
 
 // Add preflight handler for all routes
 app.options('*', cors());
+
+// Additional CORS headers for all responses
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', req.headers.origin);
+  res.header('Access-Control-Allow-Credentials', true);
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, PATCH, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization, admin-email');
+  
+  // Handle preflight requests
+  if (req.method === 'OPTIONS') {
+    res.sendStatus(200);
+  } else {
+    next();
+  }
+});
+
 app.use(express.json());
 
 // Middleware to check if user is admin (for verification purposes)
@@ -108,6 +124,11 @@ app.get('/api/health', (req, res) => {
     timestamp: new Date().toISOString(),
     message: 'EduChain backend is running'
   });
+});
+
+// Favicon endpoint to prevent 404 errors
+app.get('/favicon.ico', (req, res) => {
+  res.status(204).end(); // No content response
 });
 
 // Test admin endpoint

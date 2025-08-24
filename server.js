@@ -34,7 +34,7 @@ app.use(cors({
     'http://localhost:3000',
     'http://localhost:5173', // Vite dev server
     'http://localhost:4173', // Vite preview
-    'https://educhain-frontend.vercel.app',
+    'educhain-ay1yzm1pd-educhain-devs-projects.vercel.app',
     'https://educhain-frontend-git-main.vercel.app',
     process.env.FRONTEND_URL
   ].filter(Boolean), // Remove undefined values
@@ -47,6 +47,31 @@ app.use(cors({
 // Add preflight handler for all routes
 app.options('*', cors());
 app.use(express.json());
+
+// Middleware to check if user is admin (for verification purposes)
+const isAdmin = (req, res, next) => {
+  try {
+    // In production, implement proper admin authentication
+    const adminEmail = req.headers['admin-email'];
+    console.log('Admin check - Email:', adminEmail, 'Headers:', req.headers);
+    
+    if (!adminEmail) {
+      console.log('Admin access denied: No admin-email header');
+      return res.status(403).json({ error: 'Admin access required - admin-email header missing' });
+    }
+    
+    if (adminEmail === 'admin@educhain.com') {
+      console.log('Admin access granted for:', adminEmail);
+      next();
+    } else {
+      console.log('Admin access denied for email:', adminEmail);
+      return res.status(403).json({ error: 'Admin access required - invalid admin email' });
+    }
+  } catch (error) {
+    console.error('Admin middleware error:', error);
+    return res.status(500).json({ error: 'Internal server error in admin authentication' });
+  }
+};
 
 // Global error handler to ensure JSON responses
 app.use((err, req, res, next) => {
@@ -181,31 +206,6 @@ const authenticateToken = (req, res, next) => {
     req.user = user;
     next();
   });
-};
-
-// Middleware to check if user is admin (for verification purposes)
-const isAdmin = (req, res, next) => {
-  try {
-    // In production, implement proper admin authentication
-    const adminEmail = req.headers['admin-email'];
-    console.log('Admin check - Email:', adminEmail, 'Headers:', req.headers);
-    
-    if (!adminEmail) {
-      console.log('Admin access denied: No admin-email header');
-      return res.status(403).json({ error: 'Admin access required - admin-email header missing' });
-    }
-    
-    if (adminEmail === 'admin@educhain.com') {
-      console.log('Admin access granted for:', adminEmail);
-      next();
-    } else {
-      console.log('Admin access denied for email:', adminEmail);
-      return res.status(403).json({ error: 'Admin access required - invalid admin email' });
-    }
-  } catch (error) {
-    console.error('Admin middleware error:', error);
-    return res.status(500).json({ error: 'Internal server error in admin authentication' });
-  }
 };
 
 // Routes

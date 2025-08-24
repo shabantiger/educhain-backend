@@ -111,11 +111,7 @@ app.use((err, req, res, next) => {
   return res.status(500).json({ error: 'Internal server error' });
 });
 
-// 404 handler for unmatched routes
-app.use('*', (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.status(404).json({ error: 'Route not found', path: req.originalUrl });
-});
+
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
@@ -1952,20 +1948,6 @@ app.get('/', (_req, res) => {
   });
 });
 
-app.get('/api/health', (_req, res) => {
-  res.json({ 
-    status: 'OK', 
-    message: 'EduChain API is running',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      certificates: '/api/certificates',
-      verification: '/api/certificates/verify',
-      admin: '/api/admin',
-      health: '/api/health'
-    }
-  });
-});
-
 // Global error handler to catch any unhandled errors
 app.use((err, req, res, next) => {
   console.error('Global error handler caught:', err);
@@ -1982,15 +1964,6 @@ app.use('*', (req, res) => {
   res.status(404).json({ error: 'Route not found' });
 });
 
-// Serve static files from React build (for production)
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../frontend/build')));
-  
-  app.get('*', (_req, res) => {
-    res.sendFile(path.join(__dirname, '../frontend/build', 'index.html'));
-  });
-}
-
 // Start server
 app.listen(PORT, () => {
   console.log(`EduChain API server running on port ${PORT}`);
@@ -1998,8 +1971,8 @@ app.listen(PORT, () => {
   console.log('CORS origins allowed:', [
     'http://localhost:5000',
     'http://localhost:3000',
-    'https://educhain-frontend.vercel.app',
-    'https://educhain-frontend-git-main.vercel.app',
+    'https://educhain-kldj23n6e-educhain-devs-projects.vercel.app',
+    'https://educhain-rho.vercel.app',
     process.env.FRONTEND_URL
   ].filter(Boolean));
 });
